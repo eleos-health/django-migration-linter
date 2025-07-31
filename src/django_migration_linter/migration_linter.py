@@ -45,27 +45,27 @@ class MessageType(Enum):
 
 class MigrationLinter:
     def __init__(
-        self,
-        path: str | None = None,
-        ignore_name_contains: str | None = None,
-        ignore_name: Iterable[str] | None = None,
-        include_name_contains: str | None = None,
-        include_name: Iterable[str] | None = None,
-        include_apps: Iterable[str] | None = None,
-        exclude_apps: Iterable[str] | None = None,
-        database: str = DEFAULT_DB_ALIAS,
-        cache_path: str = DEFAULT_CACHE_PATH,
-        no_cache: bool = False,
-        only_applied_migrations: bool = False,
-        only_unapplied_migrations: bool = False,
-        exclude_migration_tests: Iterable[str] | None = None,
-        quiet: Iterable[str] | None = None,
-        warnings_as_errors_tests: Iterable[str] | None = None,
-        all_warnings_as_errors: bool = False,
-        no_output: bool = False,
-        analyser_string: str | None = None,
-        ignore_sqlmigrate_errors: bool = False,
-        ignore_initial_migrations: bool = False,
+            self,
+            path: str | None = None,
+            ignore_name_contains: str | None = None,
+            ignore_name: Iterable[str] | None = None,
+            include_name_contains: str | None = None,
+            include_name: Iterable[str] | None = None,
+            include_apps: Iterable[str] | None = None,
+            exclude_apps: Iterable[str] | None = None,
+            database: str = DEFAULT_DB_ALIAS,
+            cache_path: str = DEFAULT_CACHE_PATH,
+            no_cache: bool = False,
+            only_applied_migrations: bool = False,
+            only_unapplied_migrations: bool = False,
+            exclude_migration_tests: Iterable[str] | None = None,
+            quiet: Iterable[str] | None = None,
+            warnings_as_errors_tests: Iterable[str] | None = None,
+            all_warnings_as_errors: bool = False,
+            no_output: bool = False,
+            analyser_string: str | None = None,
+            ignore_sqlmigrate_errors: bool = False,
+            ignore_initial_migrations: bool = False,
     ):
         # Store parameters and options
         self.django_path = path
@@ -119,11 +119,11 @@ class MigrationLinter:
         return bool(self.django_path and not self.no_cache)
 
     def lint_all_migrations(
-        self,
-        app_label: str | None = None,
-        migration_name: str | None = None,
-        git_commit_id: str | None = None,
-        migrations_file_path: str | None = None,
+            self,
+            app_label: str | None = None,
+            migration_name: str | None = None,
+            git_commit_id: str | None = None,
+            migrations_file_path: str | None = None,
     ) -> None:
         # Collect migrations.
         migrations_list = self.read_migrations_list(migrations_file_path)
@@ -157,82 +157,173 @@ class MigrationLinter:
             self.new_cache.save()
 
     def lint_migration(self, migration: Migration) -> None:
+        """Lint a single migration for issues and cache results."""
         app_label = migration.app_label
         migration_name = migration.name
         operations = migration.operations
         self.nb_total += 1
 
-        md5hash = self.get_migration_hash(app_label, migration_name)
+        migration_hash = self.get_migration_hash(app_label, migration_name)
 
-        if self.should_ignore_migration(
-            app_label, migration_name, operations, is_initial=migration.initial
-        ):
-            self.print_linting_msg(
-                app_label, migration_name, "IGNORE", MessageType.IGNORE
-            )
+        # Early exit for ignored migrations
+        if self._should_skip_migration(migration, app_label, migration_name, operations):
+            return
+
+        # Early exit for cached results
+        if self._use_cached_result_if_available(app_label, migration_name, migration_hash):
+            return
+
+        # Analyze migration for issues and report results
+        self._analyze_and_report_migration(migration, app_label, migration_name, migration_hash)
+
+    def _should_skip_migration(self, migration: Migration, app_label: str,
+                               migration_name: str, operations: list) -> bool:
+        """Check if migration should be ignored and handle accordingly."""
+        if self.should_ignore_migration(app_label, migration_name, operations,
+                                        is_initial=migration.initial):
+            self.print_linting_msg(app_label, migration_name, "IGNORE", MessageType.IGNORE)
             self.nb_ignored += 1
-            return
+            return True
+        return False
 
-        if self.should_use_cache() and md5hash in self.old_cache:
-            self.lint_cached_migration(app_label, migration_name, md5hash)
-            return
+    def _use_cached_result_if_available(self, app_label: str, migration_name: str,
+                                        migration_hash: str) -> bool:
+        """Use cached result if available and caching is enabled."""
+        if self.should_use_cache() and migration_hash in self.old_cache:
+            self.lint_cached_migration(app_label, migration_name, migration_hash)
+            return True
+        return False
 
-        sql_statements = self.get_sql(app_label, migration_name)
-        errors, ignored, warnings = analyse_sql_statements(
-            self.sql_analyser_class,
-            sql_statements,
-            self.exclude_migration_tests,
+    def _analyze_and_report_migration(self, migration: Migration, app_label: str,
+                                      migration_name: str, migration_hash: str) -> None:
+        """Analyze migration and report results with appropriate caching."""
+        # Collect all issues from SQL and data migration analysis
+        all_errors, all_ignored, all_warnings = self._collect_migration_issues(
+            migration, app_label, migration_name
         )
 
-        err, ignored_data, warnings_data = self.analyse_data_migration(migration)
-        if err:
-            errors += err
-        if ignored_data:
-            ignored += ignored_data
-        if warnings_data:
-            warnings += warnings_data
+        # Apply warning-to-error conversion rules
+        final_errors, final_warnings = self._apply_warning_rules(all_errors, all_warnings)
+
+        # Determine result status and report accordingly
+        cache_value = self._report_and_cache_results(
+            app_label, migration_name, final_errors, final_warnings, all_ignored
+        )
+
+        # Cache the results if caching is enabled
+        if self.should_use_cache():
+            self.new_cache[migration_hash] = cache_value
+
+    def _collect_migration_issues(self, migration: Migration, app_label: str,
+                                  migration_name: str) -> tuple[list, list, list]:
+        """Collect all issues from SQL and data migration analysis."""
+        all_errors = []
+        all_ignored = []
+        all_warnings = []
+
+        # Analyze SQL statements
+        sql_errors, sql_ignored, sql_warnings = self._analyze_sql_statements(
+            app_label, migration_name
+        )
+
+        # Analyze data migration
+        data_errors, data_ignored, data_warnings = self._analyze_data_migration(migration)
+
+        # Combine all results
+        all_errors.extend(sql_errors)
+        all_errors.extend(data_errors or [])
+        all_ignored.extend(sql_ignored)
+        all_ignored.extend(data_ignored or [])
+        all_warnings.extend(sql_warnings)
+        all_warnings.extend(data_warnings or [])
+
+        return all_errors, all_ignored, all_warnings
+
+    def _apply_warning_rules(self, errors: list, warnings: list) -> tuple[list, list]:
+        """Apply rules to convert warnings to errors based on configuration."""
+        final_errors = errors.copy()
+        final_warnings = warnings.copy()
 
         if self.all_warnings_as_errors:
-            errors += warnings
-            warnings = []
+            final_errors.extend(final_warnings)
+            final_warnings = []
         elif self.warnings_as_errors_tests:
-            new_warnings = []
-            for w in warnings:
-                if w.code in self.warnings_as_errors_tests:
-                    errors.append(w)
+            remaining_warnings = []
+            for warning in final_warnings:
+                if warning.code in self.warnings_as_errors_tests:
+                    final_errors.append(warning)
                 else:
-                    new_warnings.append(w)
-            warnings = new_warnings
+                    remaining_warnings.append(warning)
+            final_warnings = remaining_warnings
 
-        # Fixme: have a more generic approach to handling errors/warnings/ignored/ok?
+        return final_errors, final_warnings
+
+    def _report_and_cache_results(self, app_label: str, migration_name: str,
+                                  errors: list, warnings: list, ignored: list) -> dict:
+        """Report results to user and return cache value."""
         if errors:
-            self.print_linting_msg(app_label, migration_name, "ERR", MessageType.ERROR)
-            self.nb_erroneous += 1
-            self.print_errors(errors)
-            if warnings:
-                self.print_warnings(warnings)
-            value_to_cache = {"result": "ERR", "errors": errors, "warnings": warnings}
+            return self._handle_error_result(app_label, migration_name, errors, warnings)
         elif warnings:
-            self.print_linting_msg(
-                app_label, migration_name, "WARNING", MessageType.WARNING
-            )
-            self.nb_warnings += 1
-            self.print_warnings(warnings)
-            value_to_cache = {"result": "WARNING", "warnings": warnings}
-            # Fixme: not displaying ignored errors, when
+            return self._handle_warning_result(app_label, migration_name, warnings)
         else:
-            if ignored:
-                self.print_linting_msg(
-                    app_label, migration_name, "OK (ignored)", MessageType.IGNORE
-                )
-                self.print_errors(ignored)
-            else:
-                self.print_linting_msg(app_label, migration_name, "OK", MessageType.OK)
-            self.nb_valid += 1
-            value_to_cache = {"result": "OK"}
+            return self._handle_success_result(app_label, migration_name, ignored)
 
-        if self.should_use_cache():
-            self.new_cache[md5hash] = value_to_cache
+    def _handle_error_result(self, app_label: str, migration_name: str,
+                             errors: list, warnings: list) -> dict:
+        """Handle and report error results."""
+        self.print_linting_msg(app_label, migration_name, "ERR", MessageType.ERROR)
+        self.nb_erroneous += 1
+        self.print_errors(errors)
+
+        if warnings:
+            self.print_warnings(warnings)
+
+        return {"result": "ERR", "errors": errors, "warnings": warnings}
+
+    def _handle_warning_result(self, app_label: str, migration_name: str,
+                               warnings: list) -> dict:
+        """Handle and report warning results."""
+        self.print_linting_msg(app_label, migration_name, "WARNING", MessageType.WARNING)
+        self.nb_warnings += 1
+        self.print_warnings(warnings)
+        return {"result": "WARNING", "warnings": warnings}
+
+    def _handle_success_result(self, app_label: str, migration_name: str,
+                               ignored: list) -> dict:
+        """Handle and report successful results."""
+        if ignored:
+            self.print_linting_msg(app_label, migration_name, "OK (ignored)", MessageType.IGNORE)
+            self.print_errors(ignored)
+        else:
+            self.print_linting_msg(app_label, migration_name, "OK", MessageType.OK)
+
+        self.nb_valid += 1
+        return {"result": "OK"}
+
+    def _analyze_data_migration(self, migration: Migration) -> tuple[list, list, list]:
+        """Analyze data migration operations for potential issues."""
+        try:
+            return self.analyse_data_migration(migration)
+        except Exception as e:
+            logger.error(f"Error analyzing data migration {migration.name}: {e}")
+            return [], [], []
+
+    def _analyze_sql_statements(self, app_label: str, migration_name: str) -> tuple[list, list, list]:
+        """Analyze SQL statements for potential issues."""
+        try:
+            sql_statements = self.get_sql(app_label, migration_name)
+            return analyse_sql_statements(
+                self.sql_analyser_class,
+                sql_statements,
+                self.exclude_migration_tests,
+            )
+        except (ValueError, ProgrammingError) as e:
+            logger.error(f"Error getting SQL for {app_label}.{migration_name}: {e}")
+            error = Issue(
+                code="SQLMIGRATE_ERROR",
+                message=f"Error running sqlmigrate for {app_label}.{migration_name}: {e}",
+            )
+            return [error], [], []
 
     @staticmethod
     def get_migration_hash(app_label: str, migration_name: str) -> str:
@@ -243,7 +334,7 @@ class MigrationLinter:
         return hash_md5.hexdigest()
 
     def lint_cached_migration(
-        self, app_label: str, migration_name: str, md5hash: str
+            self, app_label: str, migration_name: str, md5hash: str
     ) -> None:
         cached_value = self.old_cache[md5hash]
         if cached_value["result"] == "IGNORE":
@@ -275,7 +366,7 @@ class MigrationLinter:
         self.new_cache[md5hash] = cached_value
 
     def print_linting_msg(
-        self, app_label: str, migration_name: str, msg: str, lint_result: MessageType
+            self, app_label: str, migration_name: str, msg: str, lint_result: MessageType
     ) -> None:
         if lint_result.value in self.quiet:
             return
@@ -359,7 +450,7 @@ class MigrationLinter:
 
     @classmethod
     def read_migrations_list(
-        cls, migrations_file_path: str | None
+            cls, migrations_file_path: str | None
     ) -> list[tuple[str, str]] | None:
         """
         Returning an empty list is different from returning None here.
@@ -388,7 +479,7 @@ class MigrationLinter:
         return migrations
 
     def _gather_migrations_git(
-        self, git_commit_id: str, migrations_list: list[tuple[str, str]] | None = None
+            self, git_commit_id: str, migrations_list: list[tuple[str, str]] | None = None
     ) -> Iterable[Migration]:
         # Get changes since specified commit
         git_diff_command = [
@@ -415,7 +506,7 @@ class MigrationLinter:
 
         migrations = []
         for line in map(
-            clean_bytes_to_str, diff_process.stdout.readlines()  # type: ignore
+                clean_bytes_to_str, diff_process.stdout.readlines()  # type: ignore
         ):
             # Only gather lines that include added migrations.
             if self.is_migration_file(line):
@@ -428,8 +519,8 @@ class MigrationLinter:
                 if suitable_migrations:
                     migration = suitable_migrations[0]
                     if (
-                        migrations_list is None
-                        or (migration.app_label, migration.name) in migrations_list
+                            migrations_list is None
+                            or (migration.app_label, migration.name) in migrations_list
                     ):
                         migrations.append(migration)
                     if len(suitable_migrations) > 1:
@@ -455,7 +546,7 @@ class MigrationLinter:
         if diff_process.returncode != 0:
             output = []
             for line in map(
-                clean_bytes_to_str, diff_process.stderr.readlines()  # type: ignore
+                    clean_bytes_to_str, diff_process.stderr.readlines()  # type: ignore
             ):
                 output.append(line)
             logger.error("Error while git diff command:\n{}".format("".join(output)))
@@ -463,52 +554,52 @@ class MigrationLinter:
         return migrations
 
     def _gather_all_migrations(
-        self, migrations_list: list[tuple[str, str]] | None = None
+            self, migrations_list: list[tuple[str, str]] | None = None
     ) -> Iterable[Migration]:
         for (
-            (app_label, name),
-            migration,
+                (app_label, name),
+                migration,
         ) in self.migration_loader.disk_migrations.items():
             if app_label not in DJANGO_APPS_WITH_MIGRATIONS:  # Prune Django apps
                 if migrations_list is None or (app_label, name) in migrations_list:
                     yield migration
 
     def should_ignore_migration(
-        self,
-        app_label: str,
-        migration_name: str,
-        operations: Iterable[Operation] = (),
-        is_initial: bool = False,
+            self,
+            app_label: str,
+            migration_name: str,
+            operations: Iterable[Operation] = (),
+            is_initial: bool = False,
     ) -> bool:
         return (
-            (self.include_apps and app_label not in self.include_apps)
-            or (self.exclude_apps and app_label in self.exclude_apps)
-            or any(isinstance(o, IgnoreMigration) for o in operations)
-            or (
-                self.ignore_name_contains
-                and self.ignore_name_contains in migration_name
-            )
-            or (
-                self.include_name_contains
-                and self.include_name_contains not in migration_name
-            )
-            or (migration_name in self.ignore_name)
-            or (self.include_name and migration_name not in self.include_name)
-            or (
-                self.only_applied_migrations
-                and (app_label, migration_name)
-                not in self.migration_loader.applied_migrations
-            )
-            or (
-                self.only_unapplied_migrations
-                and (app_label, migration_name)
-                in self.migration_loader.applied_migrations
-            )
-            or (self.ignore_initial_migrations and is_initial)
+                (self.include_apps and app_label not in self.include_apps)
+                or (self.exclude_apps and app_label in self.exclude_apps)
+                or any(isinstance(o, IgnoreMigration) for o in operations)
+                or (
+                        self.ignore_name_contains
+                        and self.ignore_name_contains in migration_name
+                )
+                or (
+                        self.include_name_contains
+                        and self.include_name_contains not in migration_name
+                )
+                or (migration_name in self.ignore_name)
+                or (self.include_name and migration_name not in self.include_name)
+                or (
+                        self.only_applied_migrations
+                        and (app_label, migration_name)
+                        not in self.migration_loader.applied_migrations
+                )
+                or (
+                        self.only_unapplied_migrations
+                        and (app_label, migration_name)
+                        in self.migration_loader.applied_migrations
+                )
+                or (self.ignore_initial_migrations and is_initial)
         )
 
     def analyse_data_migration(
-        self, migration: Migration
+            self, migration: Migration
     ) -> tuple[list[Issue], list[Issue], list[Issue]]:
         errors = []
         ignored = []
@@ -538,7 +629,7 @@ class MigrationLinter:
         return function
 
     def lint_runpython(
-        self, runpython: RunPython
+            self, runpython: RunPython
     ) -> tuple[list[Issue], list[Issue], list[Issue]]:
         function_name = self.discover_function(runpython.code).__name__
         error = []
@@ -624,11 +715,11 @@ class MigrationLinter:
         for model in called_models:
             model = model.split(".", 1)[0]
             has_get_model_call = (
-                re.search(
-                    rf"{model}.*= +\w+\.get_model\(",
-                    source_code,
-                )
-                is not None
+                    re.search(
+                        rf"{model}.*= +\w+\.get_model\(",
+                        source_code,
+                    )
+                    is not None
             )
             if not has_get_model_call:
                 issues.append(
@@ -655,22 +746,22 @@ class MigrationLinter:
         issues = []
         for model in called_models:
             has_same_model_name = (
-                re.search(
-                    r"{model}.*= +\w+?\.get_model\([^)]+?\.{model}.*?\)".format(
-                        model=model
-                    ),
-                    source_code,
-                    re.MULTILINE | re.DOTALL,
-                )
-                is not None
-                or re.search(
-                    r"{model}.*= +\w+?\.get_model\([^)]+?,[^)]*?{model}.*?\)".format(
-                        model=model
-                    ),
-                    source_code,
-                    re.MULTILINE | re.DOTALL,
-                )
-                is not None
+                    re.search(
+                        r"{model}.*= +\w+?\.get_model\([^)]+?\.{model}.*?\)".format(
+                            model=model
+                        ),
+                        source_code,
+                        re.MULTILINE | re.DOTALL,
+                    )
+                    is not None
+                    or re.search(
+                r"{model}.*= +\w+?\.get_model\([^)]+?,[^)]*?{model}.*?\)".format(
+                    model=model
+                ),
+                source_code,
+                re.MULTILINE | re.DOTALL,
+            )
+                    is not None
             )
             if not has_same_model_name:
                 issues.append(
@@ -686,7 +777,7 @@ class MigrationLinter:
         return issues
 
     def lint_runsql(
-        self, runsql: RunSQL
+            self, runsql: RunSQL
     ) -> tuple[list[Issue], list[Issue], list[Issue]]:
         error = []
         ignored = []
